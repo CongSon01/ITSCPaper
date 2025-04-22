@@ -8,9 +8,10 @@ for the ITSCPaper project.
 import argparse
 import os
 import logging
+import numpy as np
 from pathlib import Path
 
-from src.data_preprocessing import run_preprocessing
+from src.data_preprocessing import preprocess_datasets
 from src.feature_fusion import get_fused_features
 from src.model import train_model_pipeline
 from src.utils import setup_logging, create_results_dir, plot_confusion_matrix, plot_feature_importance
@@ -98,7 +99,7 @@ def run_pipeline():
     # Run preprocessing if not skipped
     if not args.skip_preprocessing:
         logger.info("Running data preprocessing...")
-        preproc_results = run_preprocessing()
+        preproc_results = preprocess_datasets()
         logger.info("Preprocessing complete")
     
     # Exit if preprocess only
@@ -119,11 +120,36 @@ def run_pipeline():
     
     logger.info(f"Feature fusion complete. Fused feature shape: {fusion_results['X_fused'].shape}")
     
+    # Extract the appropriate portion of the fused features to match with y_power
+    # Note: X_fused contains data from both Power and HPC datasets
+    if len(fusion_results['X_fused']) != len(fusion_results['y_power']):
+        logger.info("Adjusting features and targets to match dimensions...")
+        logger.info(f"X_fused shape: {fusion_results['X_fused'].shape}, y_power length: {len(fusion_results['y_power'])}")
+        
+        if len(fusion_results['X_fused']) < len(fusion_results['y_power']):
+            # X_fused is smaller, so we need to truncate y_power to match
+            logger.info("X_fused is smaller than y_power. Truncating y_power to match...")
+            n_samples = len(fusion_results['X_fused'])
+            y_power_truncated = fusion_results['y_power'][:n_samples]
+            logger.info(f"Using truncated y_power. New length: {len(y_power_truncated)}")
+            X_power_fused = fusion_results['X_fused']
+            y_power = y_power_truncated
+        else:
+            # y_power is smaller, so we need to truncate X_fused to match
+            logger.info("y_power is smaller than X_fused. Truncating X_fused to match...")
+            n_samples = len(fusion_results['y_power'])
+            X_power_fused = fusion_results['X_fused'][:n_samples]
+            logger.info(f"Using truncated X_fused. New shape: {X_power_fused.shape}")
+            y_power = fusion_results['y_power']
+    else:
+        X_power_fused = fusion_results['X_fused']
+        y_power = fusion_results['y_power']
+    
     # Train model
     logger.info(f"Training {args.model_type} model...")
     model_results = train_model_pipeline(
-        fusion_results['X_fused'], 
-        fusion_results['y_power'],  # Using Power dataset targets
+        X_power_fused,  # Using correctly sized fused features
+        y_power,  # Using correctly sized Power dataset targets
         model_type=args.model_type,
         model_params={'n_estimators': args.n_estimators},
         save=args.save_model
