@@ -2,284 +2,404 @@
 Model Module
 
 This module contains the model architecture and training functions
-for the ITSCPaper project.
+for the ITSCPaper project, using TensorFlow/Keras and attention mechanisms.
 """
 
 import numpy as np
 import pandas as pd
+import tensorflow as tf
+from tensorflow.keras.layers import Input, Dense, MultiHeadAttention, LayerNormalization, Flatten
+from tensorflow.keras.models import Model
+from tensorflow.keras.optimizers import Adam
 from sklearn.model_selection import train_test_split
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import classification_report, accuracy_score, f1_score
-from sklearn.preprocessing import LabelEncoder
+from sklearn.preprocessing import StandardScaler, LabelEncoder
+from sklearn.metrics import classification_report
+import matplotlib.pyplot as plt
+from sklearn.manifold import TSNE
+import os
 import joblib
 import time
-import os
+import logging
 from pathlib import Path
-from src.config import (
-    RANDOM_STATE, TEST_SIZE, VALIDATION_SIZE,
-    PROCESSED_DATA_DIR
-)
+from src.config import RANDOM_STATE, TEST_SIZE, VALIDATION_SIZE
 
-def split_data(X, y, test_size=TEST_SIZE, val_size=VALIDATION_SIZE):
-    """
-    Split data into train, validation, and test sets.
-    
-    Parameters:
-    -----------
-    X : array-like
-        Features
-    y : array-like
-        Target
-    test_size : float, default=from config
-        Proportion of data to use for testing
-    val_size : float, default=from config
-        Proportion of training data to use for validation
-    
-    Returns:
-    --------
-    dict
-        Dictionary containing the split data
-    """
-    # First split out the test set
-    X_train_val, X_test, y_train_val, y_test = train_test_split(
-        X, y, test_size=test_size, random_state=RANDOM_STATE, stratify=y
-    )
-    
-    # Then split the remaining data into train and validation
-    X_train, X_val, y_train, y_val = train_test_split(
-        X_train_val, y_train_val, test_size=val_size, 
-        random_state=RANDOM_STATE, stratify=y_train_val
-    )
-    
-    return {
-        'X_train': X_train,
-        'X_val': X_val,
-        'X_test': X_test,
-        'y_train': y_train,
-        'y_val': y_val,
-        'y_test': y_test
-    }
+logger = logging.getLogger(__name__)
 
-def train_random_forest(X_train, y_train, n_estimators=100):
-    """
-    Train a Random Forest classifier.
-    
-    Parameters:
-    -----------
-    X_train : array-like
-        Training features
-    y_train : array-like
-        Training targets
-    n_estimators : int, default=100
-        Number of trees in the forest
-    
-    Returns:
-    --------
-    sklearn.ensemble.RandomForestClassifier
-        The trained model
-    """
-    print(f"Training Random Forest with {n_estimators} estimators...")
-    model = RandomForestClassifier(
-        n_estimators=n_estimators, 
-        random_state=RANDOM_STATE, 
-        n_jobs=-1
-    )
-    
-    start_time = time.time()
-    model.fit(X_train, y_train)
-    training_time = time.time() - start_time
-    
-    print(f"Training completed in {training_time:.2f} seconds")
-    
-    return model
-
-def evaluate_model(model, X_val, y_val, X_test=None, y_test=None):
-    """
-    Evaluate the model on validation and optionally test data.
-    
-    Parameters:
-    -----------
-    model : estimator
-        The trained model
-    X_val : array-like
-        Validation features
-    y_val : array-like
-        Validation targets
-    X_test : array-like, optional
-        Test features
-    y_test : array-like, optional
-        Test targets
-    
-    Returns:
-    --------
-    dict
-        Dictionary containing evaluation metrics
-    """
-    results = {}
-    
-    # Evaluate on validation set
-    y_val_pred = model.predict(X_val)
-    val_accuracy = accuracy_score(y_val, y_val_pred)
-    val_f1 = f1_score(y_val, y_val_pred, average='weighted')
-    
-    results['val_accuracy'] = val_accuracy
-    results['val_f1'] = val_f1
-    
-    print(f"Validation Accuracy: {val_accuracy:.4f}")
-    print(f"Validation F1-Score: {val_f1:.4f}")
-    print("\nValidation Classification Report:")
-    print(classification_report(y_val, y_val_pred))
-    
-    # Evaluate on test set if provided
-    if X_test is not None and y_test is not None:
-        y_test_pred = model.predict(X_test)
-        test_accuracy = accuracy_score(y_test, y_test_pred)
-        test_f1 = f1_score(y_test, y_test_pred, average='weighted')
+class AttentionEncoder:
+    @staticmethod
+    def create_encoder(input_dim, latent_dim=16):
+        """
+        Create an encoder with a more robust architecture
+        """
+        inputs = Input(shape=(input_dim,))
         
-        results['test_accuracy'] = test_accuracy
-        results['test_f1'] = test_f1
+        # Initial projection
+        x = Dense(64, activation='relu')(inputs)
         
-        print(f"\nTest Accuracy: {test_accuracy:.4f}")
-        print(f"Test F1-Score: {test_f1:.4f}")
-        print("\nTest Classification Report:")
-        print(classification_report(y_test, y_test_pred))
-    
-    return results
+        # Additional dense layers
+        x = Dense(32, activation='relu')(x)
+        
+        # Latent space representation
+        latent = Dense(latent_dim, activation='linear')(x)
+        
+        return Model(inputs=inputs, outputs=latent)
 
-def save_model(model, model_name, output_dir=None):
+class DatasetMerger:
+    @staticmethod
+    def merge_datasets(latent_hpc, y_hpc, latent_power, y_power):
+        """
+        Merge encoded datasets with common labels
+        """
+        try:
+            # Convert labels to strings
+            y_hpc_str = y_hpc.astype(str)
+            y_power_str = y_power.astype(str)
+            
+            # Find common labels
+            common_labels = np.intersect1d(
+                np.unique(y_hpc_str), 
+                np.unique(y_power_str)
+            )
+            
+            # Validate common labels
+            if len(common_labels) == 0:
+                raise ValueError("No common labels found between datasets")
+            
+            # Filter datasets
+            mask_hpc = np.isin(y_hpc_str, common_labels)
+            mask_power = np.isin(y_power_str, common_labels)
+            
+            X_merged = np.vstack((
+                latent_hpc[mask_hpc],
+                latent_power[mask_power]
+            ))
+            y_merged = np.concatenate((
+                y_hpc_str[mask_hpc],
+                y_power_str[mask_power]
+            ))
+            
+            # Encode labels
+            label_encoder = LabelEncoder()
+            y_merged_encoded = label_encoder.fit_transform(y_merged)
+            
+            return X_merged, y_merged_encoded, common_labels, label_encoder
+        
+        except Exception as e:
+            logger.error(f"Error in dataset merging: {e}")
+            raise
+
+class ModelTrainer:
+    @staticmethod
+    def create_classifier(input_dim, num_classes):
+        """
+        Create a joint classifier with more robust architecture
+        """
+        inputs = Input(shape=(input_dim,))
+        
+        # Multiple dense layers
+        x = Dense(64, activation='relu')(inputs)
+        x = Dense(32, activation='relu')(x)
+        x = Dense(16, activation='relu')(x)
+        
+        # Output layer
+        outputs = Dense(num_classes, activation='softmax')(x)
+        
+        model = Model(inputs=inputs, outputs=outputs)
+        model.compile(
+            optimizer=Adam(learning_rate=0.001),
+            loss='sparse_categorical_crossentropy',
+            metrics=['accuracy']
+        )
+        return model
+    
+    @staticmethod
+    def train_model(model, X_train, y_train, X_val=None, y_val=None, epochs=100, batch_size=32):
+        """
+        Train the model with early stopping
+        
+        Parameters:
+        -----------
+        model : tf.keras.Model
+            Model to train
+        X_train : array-like
+            Training features
+        y_train : array-like
+            Training targets
+        X_val : array-like, optional
+            Validation features
+        y_val : array-like, optional
+            Validation targets
+        epochs : int, default=100
+            Number of epochs to train
+        batch_size : int, default=32
+            Batch size for training
+            
+        Returns:
+        --------
+        tuple
+            (trained_model, history)
+        """
+        # Early stopping callback
+        early_stopping = tf.keras.callbacks.EarlyStopping(
+            monitor='val_loss',
+            patience=10,
+            restore_best_weights=True
+        )
+        
+        # Prepare validation data if provided
+        validation_data = None
+        if X_val is not None and y_val is not None:
+            validation_data = (X_val, y_val)
+        
+        # Train the model
+        start_time = time.time()
+        
+        history = model.fit(
+            X_train, y_train,
+            validation_data=validation_data,
+            validation_split=0.2 if validation_data is None else None,
+            epochs=epochs,
+            batch_size=batch_size,
+            callbacks=[early_stopping],
+            verbose=1
+        )
+        
+        training_time = time.time() - start_time
+        logger.info(f"Training completed in {training_time:.2f} seconds")
+        
+        return model, history
+
+class Visualizer:
+    @staticmethod
+    def plot_latent_space(X_merged, y_merged, title='Latent Space', save_path=None):
+        """
+        Visualize latent space using t-SNE
+        """
+        try:
+            plt.figure(figsize=(10, 8))
+            tsne = TSNE(n_components=2, random_state=42)
+            X_tsne = tsne.fit_transform(X_merged)
+            
+            scatter = plt.scatter(
+                X_tsne[:, 0],
+                X_tsne[:, 1],
+                c=y_merged,
+                cmap='viridis',
+                alpha=0.7
+            )
+            plt.colorbar(scatter)
+            plt.title(f't-SNE Visualization of {title}')
+            plt.xlabel('t-SNE Component 1')
+            plt.ylabel('t-SNE Component 2')
+            
+            if save_path:
+                plt.savefig(save_path)
+                logger.info(f"Saved t-SNE visualization to {save_path}")
+            else:
+                plt.show()
+                
+            plt.close()
+            
+        except Exception as e:
+            logger.error(f"Error in visualization: {e}")
+            
+    @staticmethod
+    def plot_training_history(history, save_path=None):
+        """
+        Plot training and validation metrics
+        
+        Parameters:
+        -----------
+        history : tf.keras.callbacks.History
+            Training history object
+        save_path : str, optional
+            Path to save the plot
+        """
+        try:
+            plt.figure(figsize=(12, 5))
+            
+            # Plot accuracy
+            plt.subplot(1, 2, 1)
+            plt.plot(history.history['accuracy'], label='Train')
+            if 'val_accuracy' in history.history:
+                plt.plot(history.history['val_accuracy'], label='Validation')
+            plt.title('Model Accuracy')
+            plt.xlabel('Epoch')
+            plt.ylabel('Accuracy')
+            plt.legend()
+            
+            # Plot loss
+            plt.subplot(1, 2, 2)
+            plt.plot(history.history['loss'], label='Train')
+            if 'val_loss' in history.history:
+                plt.plot(history.history['val_loss'], label='Validation')
+            plt.title('Model Loss')
+            plt.xlabel('Epoch')
+            plt.ylabel('Loss')
+            plt.legend()
+            
+            plt.tight_layout()
+            
+            if save_path:
+                plt.savefig(save_path)
+                logger.info(f"Saved training history plot to {save_path}")
+            else:
+                plt.show()
+                
+            plt.close()
+            
+        except Exception as e:
+            logger.error(f"Error plotting training history: {e}")
+
+def train_model_pipeline(X_hpc, y_hpc, X_power, y_power, latent_dim=16, save=True, output_dir=None):
     """
-    Save the trained model to disk.
+    Complete model training pipeline using attention encoders
     
     Parameters:
     -----------
-    model : estimator
-        The trained model
-    model_name : str
-        Name for the saved model
-    output_dir : str or Path, optional
-        Directory to save the model. Defaults to a 'models' folder in the
-        project root directory.
-    
-    Returns:
-    --------
-    str
-        Path where the model was saved
-    """
-    if output_dir is None:
-        # Create a models directory in the project root
-        output_dir = Path(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))) / "models"
-        os.makedirs(output_dir, exist_ok=True)
-    
-    model_path = Path(output_dir) / f"{model_name}.joblib"
-    joblib.dump(model, model_path)
-    print(f"Model saved to {model_path}")
-    
-    return model_path
-
-def train_model_pipeline(X, y, model_type='random_forest', model_params=None, save=True):
-    """
-    Complete model training pipeline.
-    
-    Parameters:
-    -----------
-    X : array-like
-        Feature matrix
-    y : array-like
-        Target vector
-    model_type : str, default='random_forest'
-        Type of model to train
-    model_params : dict, optional
-        Parameters for the model
+    X_hpc : array-like
+        HPC features
+    y_hpc : array-like
+        HPC targets
+    X_power : array-like
+        Power features
+    y_power : array-like
+        Power targets
+    latent_dim : int, default=16
+        Dimension of latent space
     save : bool, default=True
-        Whether to save the trained model
-    
+        Whether to save the trained models
+    output_dir : str or Path, optional
+        Directory to save models and visualizations
+        
     Returns:
     --------
     dict
-        Dictionary containing the model, data splits, and evaluation results
+        Dictionary containing models, encoders, and evaluation results
     """
-    # Set default model parameters if not provided
-    if model_params is None:
-        model_params = {}
-    
-    # Ensure y is encoded if it's not numeric
-    if not np.issubdtype(np.array(y).dtype, np.number):
-        print("Encoding target variable...")
-        le = LabelEncoder()
-        y = le.fit_transform(y)
-        label_encoder = le
-    else:
-        label_encoder = None
-    
-    # Split the data
-    print("Splitting data into train, validation, and test sets...")
-    data_splits = split_data(X, y)
-    
-    # Train the model
-    if model_type == 'random_forest':
-        n_estimators = model_params.get('n_estimators', 100)
-        model = train_random_forest(
-            data_splits['X_train'], 
-            data_splits['y_train'], 
-            n_estimators=n_estimators
-        )
-    else:
-        raise ValueError(f"Unsupported model type: {model_type}")
-    
-    # Evaluate the model
-    print("\nEvaluating model...")
-    evaluation = evaluate_model(
-        model, 
-        data_splits['X_val'], 
-        data_splits['y_val'],
-        data_splits['X_test'], 
-        data_splits['y_test']
-    )
-    
-    # Save the model if requested
-    if save:
-        timestamp = time.strftime("%Y%m%d-%H%M%S")
-        model_name = f"{model_type}_{timestamp}"
-        model_path = save_model(model, model_name)
-    else:
-        model_path = None
-    
-    # Return a dictionary with all relevant outputs
-    return {
-        'model': model,
-        'data_splits': data_splits,
-        'evaluation': evaluation,
-        'model_path': model_path,
-        'label_encoder': label_encoder
-    }
-
-if __name__ == "__main__":
-    # Example usage
-    from src.feature_fusion import get_fused_features
-    
-    print("Getting fused features...")
-    fusion_result = get_fused_features(fusion_method='weighted', power_weight=0.7)
-    
-    if fusion_result:
-        X = fusion_result['X_fused']
+    try:
+        logger.info("Starting model training pipeline with attention encoders")
         
-        # Use one of the target variables (you could also use a combined target if appropriate)
-        y = fusion_result['y_power']
+        # Set up output directory
+        if output_dir is None:
+            output_dir = Path(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))) / "models"
+        os.makedirs(output_dir, exist_ok=True)
         
-        print(f"Features shape: {X.shape}")
-        print(f"Target shape: {y.shape}")
+        # Create visualizations directory
+        vis_dir = Path(output_dir) / "visualizations"
+        os.makedirs(vis_dir, exist_ok=True)
         
-        print("\nStarting model training...")
-        result = train_model_pipeline(
-            X, y, 
-            model_type='random_forest', 
-            model_params={'n_estimators': 200}
+        # Create encoders
+        logger.info(f"Creating encoders with latent dimension {latent_dim}")
+        encoder_hpc = AttentionEncoder.create_encoder(input_dim=X_hpc.shape[1], latent_dim=latent_dim)
+        encoder_power = AttentionEncoder.create_encoder(input_dim=X_power.shape[1], latent_dim=latent_dim)
+        
+        # Encode datasets
+        logger.info("Encoding datasets")
+        latent_hpc = encoder_hpc.predict(X_hpc)
+        latent_power = encoder_power.predict(X_power)
+        
+        logger.info(f"Latent HPC shape: {latent_hpc.shape}")
+        logger.info(f"Latent Power shape: {latent_power.shape}")
+        
+        # Merge datasets
+        logger.info("Merging datasets")
+        X_merged, y_merged, common_labels, label_encoder = DatasetMerger.merge_datasets(
+            latent_hpc, y_hpc, latent_power, y_power
         )
         
-        print("\nTraining completed!")
-        print(f"Model saved to: {result.get('model_path')}")
-        print(f"Validation accuracy: {result['evaluation']['val_accuracy']:.4f}")
-        if 'test_accuracy' in result['evaluation']:
-            print(f"Test accuracy: {result['evaluation']['test_accuracy']:.4f}")
-    else:
-        print("Failed to get fused features. Check that data preprocessing has been completed.")
+        logger.info(f"Merged dataset shape: {X_merged.shape}")
+        logger.info(f"Common labels: {common_labels}")
+        
+        # Split data
+        X_train, X_test, y_train, y_test = train_test_split(
+            X_merged, y_merged, test_size=TEST_SIZE, random_state=RANDOM_STATE, stratify=y_merged
+        )
+        
+        X_train, X_val, y_train, y_val = train_test_split(
+            X_train, y_train, test_size=VALIDATION_SIZE, random_state=RANDOM_STATE, stratify=y_train
+        )
+        
+        logger.info(f"Training set: {X_train.shape}")
+        logger.info(f"Validation set: {X_val.shape}")
+        logger.info(f"Test set: {X_test.shape}")
+        
+        # Create and train classifier
+        logger.info("Creating classifier model")
+        classifier = ModelTrainer.create_classifier(
+            input_dim=X_merged.shape[1], num_classes=len(common_labels)
+        )
+        
+        # Train the model
+        logger.info("Training classifier model")
+        trained_model, history = ModelTrainer.train_model(
+            classifier, X_train, y_train, X_val, y_val
+        )
+        
+        # Evaluate on test set
+        logger.info("Evaluating model on test set")
+        test_loss, test_accuracy = trained_model.evaluate(X_test, y_test)
+        logger.info(f"Test accuracy: {test_accuracy:.4f}")
+        
+        # Get predictions
+        y_pred = trained_model.predict(X_test)
+        y_pred_classes = np.argmax(y_pred, axis=1)
+        
+        # Generate classification report
+        class_report = classification_report(
+            y_test, y_pred_classes, target_names=label_encoder.classes_
+        )
+        logger.info(f"Classification Report:\n{class_report}")
+        
+        # Visualizations
+        logger.info("Generating visualizations")
+        Visualizer.plot_latent_space(
+            X_merged, y_merged, title='Merged Dataset Latent Space',
+            save_path=vis_dir / 'latent_space.png'
+        )
+        
+        Visualizer.plot_training_history(
+            history, save_path=vis_dir / 'training_history.png'
+        )
+        
+        # Save models if requested
+        if save:
+            timestamp = time.strftime("%Y%m%d-%H%M%S")
+            
+            # Save encoders
+            encoder_hpc_path = Path(output_dir) / f"encoder_hpc_{timestamp}.h5"
+            encoder_power_path = Path(output_dir) / f"encoder_power_{timestamp}.h5"
+            encoder_hpc.save(encoder_hpc_path)
+            encoder_power.save(encoder_power_path)
+            
+            # Save classifier
+            classifier_path = Path(output_dir) / f"classifier_{timestamp}.h5"
+            trained_model.save(classifier_path)
+            
+            # Save label encoder
+            label_encoder_path = Path(output_dir) / f"label_encoder_{timestamp}.joblib"
+            joblib.dump(label_encoder, label_encoder_path)
+            
+            logger.info(f"Saved models to {output_dir}")
+        
+        # Return results
+        return {
+            'encoder_hpc': encoder_hpc,
+            'encoder_power': encoder_power,
+            'classifier': trained_model,
+            'history': history,
+            'test_accuracy': test_accuracy,
+            'classification_report': class_report,
+            'label_encoder': label_encoder,
+            'common_labels': common_labels,
+            'X_merged': X_merged,
+            'y_merged': y_merged,
+            'latent_hpc': latent_hpc,
+            'latent_power': latent_power
+        }
+        
+    except Exception as e:
+        logger.error(f"Error in model training pipeline: {e}")
+        import traceback
+        traceback.print_exc()
+        return None

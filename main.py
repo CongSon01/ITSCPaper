@@ -2,7 +2,7 @@
 Main Pipeline Script
 
 This script runs the complete data processing and model training pipeline
-for the ITSCPaper project.
+for the ITSCPaper project using TensorFlow and attention mechanisms.
 """
 
 import argparse
@@ -10,47 +10,38 @@ import os
 import logging
 import numpy as np
 from pathlib import Path
+import tensorflow as tf
 
-from src.data_preprocessing import preprocess_datasets
-from src.feature_fusion import get_fused_features
-from src.model import train_model_pipeline
-from src.utils import setup_logging, create_results_dir, plot_confusion_matrix, plot_feature_importance
+from src.data_preprocessing import DataProcessor, preprocess_datasets
+from src.model import AttentionEncoder, DatasetMerger, ModelTrainer, Visualizer, train_model_pipeline
+from src.utils import setup_logging, create_results_dir
 from src.config import RAW_DATA_DIR, PROCESSED_DATA_DIR
 
 def parse_args():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
-        description='ITSCPaper - Run data processing and model training pipeline'
+        description='ITSCPaper - Run data processing and model training pipeline with TensorFlow'
     )
     
     parser.add_argument(
-        '--fusion-method', 
-        type=str, 
-        choices=['concatenation', 'weighted', 'pca'],
-        default='weighted',
-        help='Feature fusion method to use'
+        '--latent-dim', 
+        type=int, 
+        default=16,
+        help='Dimension of latent space in the encoder'
     )
     
     parser.add_argument(
-        '--power-weight', 
-        type=float, 
-        default=0.5,
-        help='Weight for PowerCombined features (0-1) when using weighted fusion'
-    )
-    
-    parser.add_argument(
-        '--model-type', 
-        type=str, 
-        choices=['random_forest'],
-        default='random_forest',
-        help='Type of model to train'
-    )
-    
-    parser.add_argument(
-        '--n-estimators', 
+        '--epochs', 
         type=int, 
         default=100,
-        help='Number of estimators for random forest model'
+        help='Number of epochs to train'
+    )
+    
+    parser.add_argument(
+        '--batch-size', 
+        type=int, 
+        default=32,
+        help='Batch size for training'
     )
     
     parser.add_argument(
@@ -86,6 +77,25 @@ def run_pipeline():
     results_dir = create_results_dir()
     logger.info(f"Results will be saved to {results_dir}")
     
+    # Ensure TensorFlow is available
+    try:
+        tf_version = tf.__version__
+        logger.info(f"TensorFlow version: {tf_version}")
+        
+        # Check for GPU availability
+        gpus = tf.config.list_physical_devices('GPU')
+        if gpus:
+            logger.info(f"GPU is available. Found {len(gpus)} GPU(s)")
+            for gpu in gpus:
+                logger.info(f"  {gpu}")
+        else:
+            logger.info("No GPU found. Using CPU")
+            
+    except Exception as e:
+        logger.error(f"Error checking TensorFlow: {e}")
+        logger.error("Make sure TensorFlow is installed correctly")
+        return
+    
     # Check for data files
     if not args.skip_preprocessing:
         power_path = Path(RAW_DATA_DIR) / "Power.csv"
@@ -99,108 +109,81 @@ def run_pipeline():
     # Run preprocessing if not skipped
     if not args.skip_preprocessing:
         logger.info("Running data preprocessing...")
-        preproc_results = preprocess_datasets()
+        data_dict = preprocess_datasets()
+        if data_dict is None:
+            logger.error("Preprocessing failed")
+            return
         logger.info("Preprocessing complete")
+    else:
+        logger.info("Loading preprocessed data...")
+        try:
+            # Try to load processed data from files
+            X_hpc = np.load(os.path.join(PROCESSED_DATA_DIR, 'X_hpc.npy'))
+            y_hpc = np.load(os.path.join(PROCESSED_DATA_DIR, 'y_hpc.npy'))
+            X_power = np.load(os.path.join(PROCESSED_DATA_DIR, 'X_power.npy'))
+            y_power = np.load(os.path.join(PROCESSED_DATA_DIR, 'y_power.npy'))
+            
+            data_dict = {
+                'X_hpc': X_hpc,
+                'y_hpc': y_hpc,
+                'X_power': X_power,
+                'y_power': y_power
+            }
+            
+            # If numpy files don't exist, try loading from CSV
+            logger.info(f"Loaded preprocessed data: X_hpc shape {X_hpc.shape}, X_power shape {X_power.shape}")
+        except Exception as e:
+            logger.warning(f"Could not load preprocessed NumPy data: {e}")
+            logger.info("Trying to load from CSV files...")
+            
+            try:
+                # Load processed CSV files
+                hpc_processed = pd.read_csv(os.path.join(PROCESSED_DATA_DIR, 'HPC_processed.csv'))
+                power_processed = pd.read_csv(os.path.join(PROCESSED_DATA_DIR, 'Power_processed.csv'))
+                
+                # Extract features and targets
+                X_hpc = hpc_processed.drop(columns=['Scenario']).values
+                y_hpc = hpc_processed['Scenario'].values
+                X_power = power_processed.drop(columns=['Attack-Group']).values
+                y_power = power_processed['Attack-Group'].values
+                
+                data_dict = {
+                    'X_hpc': X_hpc,
+                    'y_hpc': y_hpc,
+                    'X_power': X_power,
+                    'y_power': y_power
+                }
+                
+                logger.info(f"Loaded preprocessed CSV data: X_hpc shape {X_hpc.shape}, X_power shape {X_power.shape}")
+            except Exception as e2:
+                logger.error(f"Failed to load processed data: {e2}")
+                logger.error("Please run preprocessing first")
+                return
     
     # Exit if preprocess only
     if args.preprocess_only:
         logger.info("Preprocessing complete. Exiting as --preprocess-only was specified.")
         return
     
-    # Get fused features
-    logger.info(f"Fusing features with method: {args.fusion_method}")
-    fusion_results = get_fused_features(
-        fusion_method=args.fusion_method,
-        power_weight=args.power_weight
+    # Train model using the new TensorFlow approach
+    logger.info(f"Training model with latent dimension {args.latent_dim}...")
+    model_results = train_model_pipeline(
+        X_hpc=data_dict['X_hpc'],
+        y_hpc=data_dict['y_hpc'],
+        X_power=data_dict['X_power'],
+        y_power=data_dict['y_power'],
+        latent_dim=args.latent_dim,
+        save=args.save_model,
+        output_dir=results_dir
     )
     
-    if fusion_results is None:
-        logger.error("Feature fusion failed. Please ensure preprocessed data exists.")
+    if model_results is None:
+        logger.error("Model training failed")
         return
     
-    logger.info(f"Feature fusion complete. Fused feature shape: {fusion_results['X_fused'].shape}")
-    
-    # Extract the appropriate portion of the fused features to match with y_power
-    # Note: X_fused contains data from both Power and HPC datasets
-    if len(fusion_results['X_fused']) != len(fusion_results['y_power']):
-        logger.info("Adjusting features and targets to match dimensions...")
-        logger.info(f"X_fused shape: {fusion_results['X_fused'].shape}, y_power length: {len(fusion_results['y_power'])}")
-        
-        if len(fusion_results['X_fused']) < len(fusion_results['y_power']):
-            # X_fused is smaller, so we need to truncate y_power to match
-            logger.info("X_fused is smaller than y_power. Truncating y_power to match...")
-            n_samples = len(fusion_results['X_fused'])
-            y_power_truncated = fusion_results['y_power'][:n_samples]
-            logger.info(f"Using truncated y_power. New length: {len(y_power_truncated)}")
-            X_power_fused = fusion_results['X_fused']
-            y_power = y_power_truncated
-        else:
-            # y_power is smaller, so we need to truncate X_fused to match
-            logger.info("y_power is smaller than X_fused. Truncating X_fused to match...")
-            n_samples = len(fusion_results['y_power'])
-            X_power_fused = fusion_results['X_fused'][:n_samples]
-            logger.info(f"Using truncated X_fused. New shape: {X_power_fused.shape}")
-            y_power = fusion_results['y_power']
-    else:
-        X_power_fused = fusion_results['X_fused']
-        y_power = fusion_results['y_power']
-    
-    # Train model
-    logger.info(f"Training {args.model_type} model...")
-    model_results = train_model_pipeline(
-        X_power_fused,  # Using correctly sized fused features
-        y_power,  # Using correctly sized Power dataset targets
-        model_type=args.model_type,
-        model_params={'n_estimators': args.n_estimators},
-        save=args.save_model
-    )
-    
-    # Generate and save visualizations
-    logger.info("Generating visualizations...")
-    
-    # Confusion matrix
-    if 'model' in model_results and 'data_splits' in model_results:
-        y_pred = model_results['model'].predict(model_results['data_splits']['X_test'])
-        
-        cm_path = results_dir / 'plots' / 'confusion_matrix.png'
-        plot_confusion_matrix(
-            model_results['data_splits']['y_test'],
-            y_pred,
-            figsize=(10, 8),
-            save_path=cm_path
-        )
-        logger.info(f"Confusion matrix saved to {cm_path}")
-        
-        # Feature importance (if applicable)
-        if hasattr(model_results['model'], 'feature_importances_'):
-            # Get feature names - this depends on how features were created
-            if isinstance(fusion_results['X_fused'], tuple):
-                feature_names = [f"Feature_{i}" for i in range(model_results['data_splits']['X_train'].shape[1])]
-            else:
-                # If X_fused is a DataFrame with column names
-                try:
-                    feature_names = fusion_results['X_fused'].columns.tolist()
-                except:
-                    feature_names = [f"Feature_{i}" for i in range(model_results['data_splits']['X_train'].shape[1])]
-            
-            fi_path = results_dir / 'plots' / 'feature_importance.png'
-            plot_feature_importance(
-                model_results['model'],
-                feature_names,
-                top_n=20,
-                figsize=(12, 8),
-                save_path=fi_path
-            )
-            logger.info(f"Feature importance plot saved to {fi_path}")
-    
+    # Generate visualizations (already done in train_model_pipeline)
     logger.info(f"Model training complete!")
-    logger.info(f"Validation accuracy: {model_results['evaluation']['val_accuracy']:.4f}")
-    if 'test_accuracy' in model_results['evaluation']:
-        logger.info(f"Test accuracy: {model_results['evaluation']['test_accuracy']:.4f}")
-    
-    # Save model path
-    if args.save_model and model_results.get('model_path'):
-        logger.info(f"Model saved to: {model_results['model_path']}")
+    logger.info(f"Test accuracy: {model_results['test_accuracy']:.4f}")
     
     logger.info(f"All results saved to {results_dir}")
     logger.info("Pipeline complete.")
