@@ -355,11 +355,11 @@ def train_model_pipeline(X_hpc, y_hpc, X_power, y_power, latent_dim=16, save=Tru
         logger.info("Generating visualizations")
         Visualizer.plot_latent_space(
             X_merged, y_merged, title='Merged Dataset Latent Space',
-            save_path=vis_dir / 'latent_space.png'
+            save_path=str(vis_dir / 'latent_space.png')
         )
         
         Visualizer.plot_training_history(
-            history, save_path=vis_dir / 'training_history.png'
+            history, save_path=str(vis_dir / 'training_history.png')
         )
         
         # Save models if requested
@@ -367,17 +367,17 @@ def train_model_pipeline(X_hpc, y_hpc, X_power, y_power, latent_dim=16, save=Tru
             timestamp = time.strftime("%Y%m%d-%H%M%S")
             
             # Save encoders
-            encoder_hpc_path = Path(output_dir) / f"encoder_hpc_{timestamp}.h5"
-            encoder_power_path = Path(output_dir) / f"encoder_power_{timestamp}.h5"
+            encoder_hpc_path = os.path.join(output_dir, f"encoder_hpc_{timestamp}.h5")
+            encoder_power_path = os.path.join(output_dir, f"encoder_power_{timestamp}.h5")
             encoder_hpc.save(encoder_hpc_path)
             encoder_power.save(encoder_power_path)
             
             # Save classifier
-            classifier_path = Path(output_dir) / f"classifier_{timestamp}.h5"
+            classifier_path = os.path.join(output_dir, f"classifier_{timestamp}.h5")
             trained_model.save(classifier_path)
             
             # Save label encoder
-            label_encoder_path = Path(output_dir) / f"label_encoder_{timestamp}.joblib"
+            label_encoder_path = os.path.join(output_dir, f"label_encoder_{timestamp}.joblib")
             joblib.dump(label_encoder, label_encoder_path)
             
             logger.info(f"Saved models to {output_dir}")

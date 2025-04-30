@@ -6,8 +6,22 @@ into a shared latent space using Maximum Mean Discrepancy (MMD) techniques.
 The encoder is trained with both triplet loss and adversarial loss.
 """
 
+import os
+# Configure TensorFlow to disable CPU instruction optimizations
+# This must be set before importing TensorFlow
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+os.environ['TF_DISABLE_MKL'] = '1'
+
 import numpy as np
 import tensorflow as tf
+
+# Further TensorFlow configuration for CPU compatibility
+try:
+    tf.config.threading.set_inter_op_parallelism_threads(1)
+    tf.config.threading.set_intra_op_parallelism_threads(1)
+except:
+    pass
+
 from tensorflow.keras.layers import Input, Dense, Dropout, BatchNormalization
 from tensorflow.keras.models import Model
 from tensorflow.keras.optimizers import Adam

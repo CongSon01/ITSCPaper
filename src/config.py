@@ -4,7 +4,6 @@ Project Configuration File
 This module contains all the configuration settings for the project,
 including file paths, model hyperparameters, and other constants.
 """
-
 import os
 from pathlib import Path
 
@@ -34,4 +33,3 @@ VALIDATION_SIZE = 0.2
 LEARNING_RATE = 0.001
 BATCH_SIZE = 32
 EPOCHS = 100
-EARLY_STOPPING_PATIENCE = 10

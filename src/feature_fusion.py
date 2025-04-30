@@ -6,10 +6,11 @@ from the PowerCombined and HPC-Kernel-Events datasets, with specific
 techniques to transform them into a common latent space while addressing
 concept drift issues.
 """
-
+import os
 import numpy as np
 import pandas as pd
-import os
+import matplotlib.pyplot as plt
+import logging
 import joblib
 from pathlib import Path
 from sklearn.preprocessing import StandardScaler
@@ -35,6 +36,11 @@ except ImportError:
     print("PyTorch not available. Neural network-based fusion methods will fall back to PCA-based methods.")
 
 from sklearn.model_selection import train_test_split
+
+# Set up logging
+logging.basicConfig(level=logging.INFO,
+                   format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 def load_processed_data():
     """
@@ -77,9 +83,9 @@ def load_preprocessing_models():
         if path.exists():
             try:
                 models[name] = joblib.load(path)
-                print(f"Loaded {name} model")
+                print(f"Loaded {name} from {path}")
             except Exception as e:
-                print(f"Error loading {name} model: {e}")
+                print(f"Error loading {name}: {e}")
         else:
             print(f"Model file not found: {path}")
     
@@ -120,8 +126,7 @@ def align_datasets(power_df, hpc_df):
         common_labels = []
         for p_label in power_labels:
             for h_label in hpc_labels:
-                if (isinstance(p_label, str) and isinstance(h_label, str) and 
-                    (p_label.lower() in h_label.lower() or h_label.lower() in p_label.lower())):
+                if str(p_label).lower() in str(h_label).lower() or str(h_label).lower() in str(p_label).lower():
                     common_labels.append((p_label, h_label))
         
         if common_labels:
@@ -762,148 +767,105 @@ def train_adversarial_encoder(source_data, target_data, source_labels,
     
     return model, history
 
-def train_domain_adversarial_encoder(source_data, target_data, source_labels=None, target_labels=None, 
-                               input_dim=None, latent_dim=64, hidden_dim=128, batch_size=64,
-                               num_epochs=100, learning_rate=0.001, device='cuda' if torch.cuda.is_available() else 'cpu'):
+def train_domain_adversarial_encoder(X_source, y_source, X_target, latent_dim=32, 
+                                 num_epochs=100, batch_size=64, lr=0.001,
+                                 weight_decay=1e-5, alpha=1.0, device=None):
     """
-    Train a domain adversarial encoder to transform source and target datasets into a shared latent space.
+    Train a domain adversarial encoder for cross-domain feature fusion.
+    
+    This function takes source and target domain data and trains a domain adversarial
+    neural network that maps both domains to a common latent space where domain
+    discrimination is difficult, while maintaining class discrimination ability.
     
     Parameters:
     -----------
-    source_data : numpy.ndarray
-        Source domain data
-    target_data : numpy.ndarray
-        Target domain data
-    source_labels : numpy.ndarray, optional
-        Source domain labels for supervised learning
-    target_labels : numpy.ndarray, optional
-        Target domain labels for supervised learning (can be partially labeled)
-    input_dim : int, optional
-        Input dimension (auto-detected if not provided)
-    latent_dim : int, default=64
-        Dimension of the shared latent space
-    hidden_dim : int, default=128
-        Hidden layer dimension
-    batch_size : int, default=64
-        Batch size for training
+    X_source : numpy.ndarray
+        Source domain features
+    y_source : numpy.ndarray
+        Source domain labels
+    X_target : numpy.ndarray
+        Target domain features
+    latent_dim : int, default=32
+        Dimensionality of the latent space
     num_epochs : int, default=100
         Number of training epochs
-    learning_rate : float, default=0.001
-        Learning rate for optimizer
-    device : str, default='cuda' if available else 'cpu'
-        Device to run the training on
-
+    batch_size : int, default=64
+        Batch size for training
+    lr : float, default=0.001
+        Learning rate
+    weight_decay : float, default=1e-5
+        L2 regularization strength
+    alpha : float, default=1.0
+        Domain confusion strength (gradient reversal layer parameter)
+    device : str, default=None
+        Device to use for training ('cuda', 'cpu', or None for auto-detection)
+    
     Returns:
     --------
     model : DomainAdversarialEncoder
-        Trained encoder model
+        Trained domain adversarial encoder model
+    history : dict
+        Training history dictionary containing metrics over epochs
     """
-    # Auto-detect input dimension if not provided
-    if input_dim is None:
-        input_dim = source_data.shape[1]
+    if not TORCH_AVAILABLE:
+        print("PyTorch is not available. Cannot perform domain adversarial fusion.")
+        return None, None
     
-    # Prepare data for training
-    source_tensor = torch.FloatTensor(source_data)
-    target_tensor = torch.FloatTensor(target_data)
+    # Convert inputs to numpy arrays if they are not
+    if isinstance(X_source, pd.DataFrame):
+        X_source = X_source.values
+    if isinstance(y_source, pd.Series):
+        y_source = y_source.values
+    if isinstance(X_target, pd.DataFrame):
+        X_target = X_target.values
     
-    # Create domain labels: 1 for source, 0 for target
-    source_domain = torch.ones(source_data.shape[0], 1)
-    target_domain = torch.zeros(target_data.shape[0], 1)
+    # Check for NaN values and replace if necessary
+    if np.isnan(X_source).any():
+        print("Warning: Source data contains NaN values. Replacing with zeros.")
+        X_source = np.nan_to_num(X_source)
+    if np.isnan(X_target).any():
+        print("Warning: Target data contains NaN values. Replacing with zeros.")
+        X_target = np.nan_to_num(X_target)
     
-    # Determine if we have labels for supervised learning
-    has_labels = source_labels is not None
+    # Determine device
+    if device is None:
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    print(f"Using device: {device}")
     
-    # Create datasets
-    if has_labels:
-        source_labels_tensor = torch.LongTensor(source_labels)
-        source_dataset = TensorDataset(source_tensor, source_labels_tensor, source_domain)
-        
-        if target_labels is not None:
-            # If we have target labels
-            target_labels_tensor = torch.LongTensor(target_labels)
-            target_dataset = TensorDataset(target_tensor, target_labels_tensor, target_domain)
-        else:
-            # Create dummy labels for target domain
-            dummy_labels = torch.zeros(target_data.shape[0]).long()
-            target_dataset = TensorDataset(target_tensor, dummy_labels, target_domain)
-    else:
-        # Unsupervised case - only domain adaptation
-        dummy_source_labels = torch.zeros(source_data.shape[0]).long()
-        dummy_target_labels = torch.zeros(target_data.shape[0]).long()
-        source_dataset = TensorDataset(source_tensor, dummy_source_labels, source_domain)
-        target_dataset = TensorDataset(target_tensor, dummy_target_labels, target_domain)
+    # Get input dimensionality 
+    input_dim = X_source.shape[1]
     
-    # Create combined dataset and dataloader
-    combined_dataset = ConcatDataset([source_dataset, target_dataset])
-    dataloader = DataLoader(combined_dataset, batch_size=batch_size, shuffle=True)
+    # Convert labels to numeric if they're not already
+    from sklearn.preprocessing import LabelEncoder
+    if not np.issubdtype(y_source.dtype, np.number):
+        label_encoder = LabelEncoder()
+        y_source = label_encoder.fit_transform(y_source)
+        print(f"Label mapping: {dict(zip(label_encoder.classes_, range(len(label_encoder.classes_))))}")
     
-    # Initialize model, optimizer, and loss functions
-    num_classes = len(np.unique(source_labels)) if has_labels else 2
-    model = DomainAdversarialEncoder(input_dim, latent_dim, hidden_dim, num_classes)
-    model.to(device)
+    # Get number of classes
+    num_classes = len(np.unique(y_source))
     
-    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
-    class_criterion = nn.CrossEntropyLoss()
-    domain_criterion = nn.BCELoss()
+    # Initialize the model
+    model = DomainAdversarialEncoder(input_dim, latent_dim, 
+                                    hidden_dim=128, 
+                                    num_classes=num_classes).to(device)
     
-    # Training loop
-    model.train()
-    for epoch in range(num_epochs):
-        total_loss = 0
-        class_loss_total = 0
-        domain_loss_total = 0
-        
-        for batch_data, batch_labels, batch_domains in dataloader:
-            batch_data = batch_data.to(device)
-            batch_labels = batch_labels.to(device)
-            batch_domains = batch_domains.to(device)
-            
-            # Forward pass with adaptive gradient reversal weight
-            # Alpha increases with training progress to gradually enforce domain adaptation
-            p = float(epoch) / num_epochs
-            alpha = 2. / (1. + np.exp(-10 * p)) - 1
-            
-            features, class_outputs, domain_outputs = model(batch_data, alpha)
-            
-            # Class loss (only for source domain with labels if we have them)
-            if has_labels:
-                # We compute class loss only for source samples (domain=1) if supervised
-                source_idx = batch_domains.squeeze() > 0.5
-                if torch.sum(source_idx) > 0:
-                    class_loss = class_criterion(
-                        class_outputs[source_idx], 
-                        batch_labels[source_idx]
-                    )
-                else:
-                    class_loss = torch.tensor(0.0).to(device)
-            else:
-                class_loss = torch.tensor(0.0).to(device)
-                
-            # Domain classification loss
-            domain_loss = domain_criterion(domain_outputs, batch_domains)
-            
-            # Total loss - balance between classification and domain adaptation
-            if has_labels:
-                loss = class_loss + domain_loss
-            else:
-                loss = domain_loss
-                
-            # Optimization step
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            
-            total_loss += loss.item()
-            class_loss_total += class_loss.item() if isinstance(class_loss, torch.Tensor) else 0
-            domain_loss_total += domain_loss.item()
-            
-        # Print progress
-        if (epoch + 1) % 10 == 0:
-            print(f"Epoch {epoch+1}/{num_epochs}, Loss: {total_loss:.4f}, "
-                  f"Class Loss: {class_loss_total:.4f}, Domain Loss: {domain_loss_total:.4f}")
+    # Train the model
+    print(f"Training domain adversarial encoder (input_dim={input_dim}, latent_dim={latent_dim}, num_classes={num_classes})")
+    print(f"Source data shape: {X_source.shape}, Target data shape: {X_target.shape}")
     
-    model.eval()
-    return model
+    history = train_adversarial_encoder(
+        X_source, X_target, y_source,
+        input_dim=input_dim,
+        latent_dim=latent_dim,
+        num_epochs=num_epochs,
+        batch_size=batch_size,
+        lr=lr,
+        weight_decay=weight_decay,
+        alpha=alpha
+    )
+    
+    return model, history
 
 def encoder_feature_fusion(X_power, y_power, X_hpc, y_hpc, latent_dim=32, save_models=True):
     """
@@ -1408,13 +1370,6 @@ def create_tsne_visualization(X_power, X_hpc, y_power=None, y_hpc=None, output_p
     output_path : str, optional
         Path to save the visualization
     """
-    import matplotlib.pyplot as plt
-    
-    # Convert to numpy arrays if needed
-    if isinstance(X_power, pd.DataFrame):
-        X_power = X_power.values
-    if isinstance(X_hpc, pd.DataFrame):
-        X_hpc = X_hpc.values
     
     # Limit to 1000 samples max for each dataset for visualization
     max_samples = 1000
@@ -1767,7 +1722,7 @@ def train_domain_adversarial_encoder(X_source, y_source, X_target, latent_dim=32
         Training history dictionary containing metrics over epochs
     """
     if not TORCH_AVAILABLE:
-        print("PyTorch is not available. Cannot train domain adversarial encoder.")
+        print("PyTorch is not available. Cannot perform domain adversarial fusion.")
         return None, None
     
     # Convert inputs to numpy arrays if they are not

@@ -14,11 +14,15 @@ import matplotlib.pyplot as plt
 import tensorflow as tf
 
 from src.config import PROCESSED_DATA_DIR
-from src.models.mmd_gan import MMDGANEncoder
-from src.models.trainer import MMDFusionTrainer
-# Import directly from src.utils instead of src.utils.visualization
+# Fix the import paths to use the correct module locations
+from src.mmd_gan_encoder import MMDGANEncoder, MMDFusionTrainer
 from src.utils import setup_logging, visualize_latent_space
-from src.utils.visualization import plot_training_history_mmd
+# Import plot_training_history_mmd from the correct location
+try:
+    from src.utils.visualization import plot_training_history_mmd
+except ImportError:
+    # Fallback if the module structure is different
+    from src.utils import plot_training_history_mmd
 
 def parse_args():
     """Parse command line arguments."""
@@ -179,31 +183,9 @@ def main():
             save_path=vis_dir / "combined_latent_space.png"
         )
         
-        # Plot training losses
+        # Plot training losses using imported function
         if history:
-            plt.figure(figsize=(15, 10))
-            
-            # Plot losses
-            plt.subplot(2, 1, 1)
-            plt.plot(history['triplet_loss'], label='Triplet Loss')
-            plt.plot(history['discriminator_loss'], label='Discriminator Loss')
-            plt.plot(history['generator_loss'], label='Generator Loss')
-            plt.title('Training Losses')
-            plt.xlabel('Epoch')
-            plt.ylabel('Loss')
-            plt.legend()
-            
-            # Plot discriminator accuracy
-            plt.subplot(2, 1, 2)
-            plt.plot(history['discriminator_accuracy'], label='Discriminator Accuracy')
-            plt.title('Discriminator Accuracy')
-            plt.xlabel('Epoch')
-            plt.ylabel('Accuracy')
-            plt.legend()
-            
-            plt.tight_layout()
-            plt.savefig(vis_dir / "training_history.png")
-            plt.close()
+            plot_training_history_mmd(history, save_path=vis_dir / "training_history.png")
     
     # Save model if requested
     if args.save_model:

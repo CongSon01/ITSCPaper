@@ -4,19 +4,17 @@ Data Preprocessing Module
 This module contains functions for preprocessing the PowerCombined and HPC-Kernel-Events
 datasets using the DataProcessor class approach.
 """
-
-import pandas as pd
-import numpy as np
 import os
-from pathlib import Path
+import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
-import seaborn as sns
+import logging
+import joblib
+from pathlib import Path
 from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.model_selection import train_test_split
-import joblib
-import logging
 from datetime import datetime
-from src.config import RAW_DATA_DIR, PROCESSED_DATA_DIR
+from src.config import RAW_DATA_DIR, PROCESSED_DATA_DIR, HPC_RAW_FILE, POWER_RAW_FILE
 
 # Set up logging
 logging.basicConfig(
@@ -49,13 +47,14 @@ class DataProcessor:
         try:
             # Use default paths if not provided
             if hpc_path is None:
-                hpc_path = Path(RAW_DATA_DIR) / "HPC.csv"
-            if power_path is None:
-                power_path = Path(RAW_DATA_DIR) / "Power.csv"
+                hpc_path = HPC_RAW_FILE
                 
-            # Load datasets  
-            hpc_df = pd.read_csv(hpc_path)  
-            power_df = pd.read_csv(power_path)
+            if power_path is None:
+                power_path = POWER_RAW_FILE
+                
+            # Load datasets - convert Path objects to strings if needed
+            hpc_df = pd.read_csv(str(hpc_path))  
+            power_df = pd.read_csv(str(power_path))
             
             logger.info(f"Loaded Power dataset with shape: {power_df.shape}")
             logger.info(f"Loaded HPC dataset with shape: {hpc_df.shape}")
@@ -72,28 +71,28 @@ class DataProcessor:
             scaler_hpc = StandardScaler()  
             scaler_power = StandardScaler()  
             
-            X_hpc_scaled = scaler_hpc.fit_transform(X_hpc)  
+            X_hpc_scaled = scaler_hpc.fit_transform(X_hpc)
             X_power_scaled = scaler_power.fit_transform(X_power)
-
-            # Save scalers
-            scaler_hpc_path = os.path.join(PROCESSED_DATA_DIR, 'hpc_scaler.joblib')
-            scaler_power_path = os.path.join(PROCESSED_DATA_DIR, 'power_scaler.joblib')
-            joblib.dump(scaler_hpc, scaler_hpc_path)
-            joblib.dump(scaler_power, scaler_power_path)
-            logger.info(f"Saved scalers to {PROCESSED_DATA_DIR}")
             
-            return {  
-                'X_hpc': X_hpc_scaled,  
-                'y_hpc': y_hpc,  
-                'X_power': X_power_scaled,  
+            # Save scalers for later use
+            joblib.dump(scaler_hpc, os.path.join(PROCESSED_DATA_DIR, "hpc_scaler.joblib"))
+            joblib.dump(scaler_power, os.path.join(PROCESSED_DATA_DIR, "power_scaler.joblib"))
+            
+            # Return preprocessed data
+            return {
+                'X_hpc': X_hpc_scaled,
+                'y_hpc': y_hpc,
+                'X_power': X_power_scaled,
                 'y_power': y_power,
+                'hpc_df': hpc_df,
+                'power_df': power_df,
                 'scaler_hpc': scaler_hpc,
                 'scaler_power': scaler_power
             }
             
         except Exception as e:  
-            logger.error(f"Error in data loading: {e}")  
-            raise
+            logger.error(f"Error loading data: {e}")
+            return None
 
     @staticmethod
     def save_processed_data(data_dict, save_arrays=True, save_dataframes=True):
@@ -110,31 +109,30 @@ class DataProcessor:
             Whether to save as CSV files
         """
         try:
+            # Save as CSV files
             if save_dataframes:
-                # Save HPC data
-                hpc_df = pd.DataFrame(data_dict['X_hpc'])
-                hpc_df['Scenario'] = data_dict['y_hpc']
-                hpc_df.to_csv(os.path.join(PROCESSED_DATA_DIR, 'HPC_processed.csv'), index=False)
+                # Create DataFrames from arrays and save
+                if 'X_hpc' in data_dict and 'y_hpc' in data_dict:
+                    hpc_df = pd.DataFrame(data_dict['X_hpc'])
+                    hpc_df['Scenario'] = data_dict['y_hpc']
+                    hpc_df.to_csv(os.path.join(PROCESSED_DATA_DIR, "HPC_processed.csv"), index=False)
+                    logger.info(f"Saved processed HPC data to {os.path.join(PROCESSED_DATA_DIR, 'HPC_processed.csv')}")
                 
-                # Save Power data
-                power_df = pd.DataFrame(data_dict['X_power'])
-                power_df['Attack-Group'] = data_dict['y_power']
-                power_df.to_csv(os.path.join(PROCESSED_DATA_DIR, 'Power_processed.csv'), index=False)
-                
-                logger.info("Saved processed data as CSV files")
+                if 'X_power' in data_dict and 'y_power' in data_dict:
+                    power_df = pd.DataFrame(data_dict['X_power'])
+                    power_df['Attack-Group'] = data_dict['y_power']
+                    power_df.to_csv(os.path.join(PROCESSED_DATA_DIR, "Power_processed.csv"), index=False)
+                    logger.info(f"Saved processed Power data to {os.path.join(PROCESSED_DATA_DIR, 'Power_processed.csv')}")
             
+            # Save numpy arrays
             if save_arrays:
-                # Save numpy arrays
-                np.save(os.path.join(PROCESSED_DATA_DIR, 'X_hpc.npy'), data_dict['X_hpc'])
-                np.save(os.path.join(PROCESSED_DATA_DIR, 'y_hpc.npy'), data_dict['y_hpc'])
-                np.save(os.path.join(PROCESSED_DATA_DIR, 'X_power.npy'), data_dict['X_power'])
-                np.save(os.path.join(PROCESSED_DATA_DIR, 'y_power.npy'), data_dict['y_power'])
-                
-                logger.info("Saved processed data as NumPy arrays")
+                for key, value in data_dict.items():
+                    if isinstance(value, np.ndarray):
+                        np.save(os.path.join(PROCESSED_DATA_DIR, f"{key}.npy"), value)
+                        logger.info(f"Saved array {key} to {os.path.join(PROCESSED_DATA_DIR, f'{key}.npy')}")
                 
         except Exception as e:
             logger.error(f"Error saving processed data: {e}")
-            raise
 
     @staticmethod
     def plot_data_distribution(data_dict, save_dir=None):
@@ -149,7 +147,8 @@ class DataProcessor:
             Directory to save plots
         """
         if save_dir is None:
-            save_dir = os.path.join(PROCESSED_DATA_DIR, 'visualizations')
+            save_dir = os.path.join(PROCESSED_DATA_DIR, "visualizations")
+            
         os.makedirs(save_dir, exist_ok=True)
         
         # Plot HPC data class distribution
