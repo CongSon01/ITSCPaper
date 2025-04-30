@@ -2,7 +2,7 @@
 Example Script for Training TensorFlow Model
 
 This script demonstrates how to train a model using the TensorFlow-based
-approach with attention encoders.
+approach with attention encoders or MMD-GAN encoder.
 """
 
 import numpy as np
@@ -22,13 +22,14 @@ from pathlib import Path
 
 from src.data_preprocessing import DataProcessor
 from src.model import AttentionEncoder, DatasetMerger, ModelTrainer, Visualizer
+from src.mmd_gan_encoder import MMDGANEncoder, MMDFusionTrainer
 from src.utils import setup_logging
 from src.config import RAW_DATA_DIR, PROCESSED_DATA_DIR
 
 def parse_args():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
-        description='Train a model using TensorFlow and attention mechanisms'
+        description='Train a model using TensorFlow and attention mechanisms or MMD-GAN'
     )
     
     parser.add_argument(
@@ -64,6 +65,21 @@ def parse_args():
         help='Save the trained model'
     )
     
+    parser.add_argument(
+        '--encoder-type', 
+        type=str, 
+        default='attention',
+        choices=['attention', 'mmd-gan'],
+        help='Type of encoder to use (attention or mmd-gan)'
+    )
+    
+    parser.add_argument(
+        '--triplet-margin', 
+        type=float, 
+        default=1.0,
+        help='Margin parameter for triplet loss (only used with mmd-gan)'
+    )
+    
     return parser.parse_args()
 
 def main():
@@ -73,7 +89,7 @@ def main():
     
     # Set up logging
     logger = setup_logging()
-    logger.info("Starting TensorFlow model training...")
+    logger.info(f"Starting TensorFlow model training with {args.encoder_type} encoder...")
     
     try:
         # File paths
@@ -84,35 +100,77 @@ def main():
         logger.info("Loading and preprocessing data...")
         data = DataProcessor.load_data(hpc_path=HPC_PATH, power_path=POWER_PATH)
         
-        # Create encoders
-        encoder_hpc = AttentionEncoder.create_encoder(
-            input_dim=data['X_hpc'].shape[1],
-            latent_dim=args.latent_dim
-        )
-        encoder_power = AttentionEncoder.create_encoder(
-            input_dim=data['X_power'].shape[1],
-            latent_dim=args.latent_dim
-        )
-        
-        # Print model summaries for debugging
-        logger.info("HPC Encoder Summary:")
-        encoder_hpc.summary()
-        logger.info("\nPower Encoder Summary:")
-        encoder_power.summary()
-        
-        # Encode datasets
-        latent_hpc = encoder_hpc.predict(data['X_hpc'])
-        latent_power = encoder_power.predict(data['X_power'])
-        
-        # Print shapes for verification
-        logger.info(f"\nLatent HPC Shape: {latent_hpc.shape}")
-        logger.info(f"Latent Power Shape: {latent_power.shape}")
-        
-        # Merge datasets
-        X_merged, y_merged, common_labels, label_encoder = DatasetMerger.merge_datasets(
-            latent_hpc, data['y_hpc'],
-            latent_power, data['y_power']
-        )
+        # Create encoder based on chosen type
+        if args.encoder_type == 'attention':
+            # Create attention-based encoders
+            encoder_hpc = AttentionEncoder.create_encoder(
+                input_dim=data['X_hpc'].shape[1],
+                latent_dim=args.latent_dim
+            )
+            encoder_power = AttentionEncoder.create_encoder(
+                input_dim=data['X_power'].shape[1],
+                latent_dim=args.latent_dim
+            )
+            
+            # Print model summaries for debugging
+            logger.info("HPC Encoder Summary:")
+            encoder_hpc.summary()
+            logger.info("\nPower Encoder Summary:")
+            encoder_power.summary()
+            
+            # Encode datasets
+            latent_hpc = encoder_hpc.predict(data['X_hpc'])
+            latent_power = encoder_power.predict(data['X_power'])
+            
+            # Print shapes for verification
+            logger.info(f"\nLatent HPC Shape: {latent_hpc.shape}")
+            logger.info(f"Latent Power Shape: {latent_power.shape}")
+            
+            # Merge datasets
+            X_merged, y_merged, common_labels, label_encoder = DatasetMerger.merge_datasets(
+                latent_hpc, data['y_hpc'],
+                latent_power, data['y_power']
+            )
+            
+        else:  # mmd-gan
+            # Create MMD-GAN fusion trainer
+            trainer = MMDFusionTrainer(
+                latent_dim=args.latent_dim,
+                batch_size=args.batch_size,
+                epochs=args.epochs,
+                triplet_margin=args.triplet_margin
+            )
+            
+            # Train the MMD-GAN encoder
+            logger.info("Training MMD-GAN encoder...")
+            encoder, history = trainer.train_mmd_encoder(
+                X_hpc=data['X_hpc'],
+                y_hpc=data['y_hpc'],
+                X_power=data['X_power'],
+                y_power=data['y_power']
+            )
+            
+            # Process data with the trained encoder
+            processed_data = trainer.process_data(
+                encoder=encoder,
+                X_hpc=data['X_hpc'],
+                y_hpc=data['y_hpc'],
+                X_power=data['X_power'],
+                y_power=data['y_power']
+            )
+            
+            # Extract merged data
+            X_merged = processed_data['X_combined']
+            y_merged = processed_data['y_combined']
+            common_labels = processed_data['common_labels']
+            
+            # Create a label encoder for compatibility
+            label_encoder = LabelEncoder()
+            label_encoder.fit(y_merged)
+            
+            # Print information
+            logger.info(f"MMD-GAN encoder trained successfully")
+            logger.info(f"Merged data shape: {X_merged.shape}")
         
         logger.info(f"Common labels: {common_labels}")
         logger.info(f"Merged data shape: {X_merged.shape}")
@@ -125,7 +183,7 @@ def main():
         # Create and train classifier
         classifier = ModelTrainer.create_classifier(
             input_dim=X_merged.shape[1],
-            num_classes=len(common_labels)
+            num_classes=len(np.unique(y_merged))
         )
         
         # Early stopping
@@ -175,7 +233,7 @@ def main():
         print(classification_report(
             y_test,
             y_pred_classes,
-            target_names=label_encoder.classes_
+            target_names=label_encoder.classes_ if hasattr(label_encoder, 'classes_') else None
         ))
         
         # Save models if requested
@@ -185,9 +243,13 @@ def main():
             model_dir = Path("models")
             model_dir.mkdir(exist_ok=True)
             
-            # Save models
-            encoder_hpc.save(model_dir / "encoder_hpc_model.h5")
-            encoder_power.save(model_dir / "encoder_power_model.h5")
+            # Save models based on encoder type
+            if args.encoder_type == 'attention':
+                encoder_hpc.save(model_dir / "encoder_hpc_model.h5")
+                encoder_power.save(model_dir / "encoder_power_model.h5")
+            else:
+                encoder.save_model(model_dir)
+                
             classifier.save(model_dir / "classifier_model.h5")
             
             logger.info(f"Models saved to {model_dir}")

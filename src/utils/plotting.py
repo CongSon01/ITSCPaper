@@ -1,71 +1,15 @@
 """
-Utility Functions Module
+Plotting Utilities
 
-This module contains utility and helper functions for the project.
+This module provides general plotting and visualization functions for the project.
 """
 
-import os
-import logging
-import numpy as np
-import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
-from sklearn.metrics import confusion_matrix, roc_curve, auc
-from sklearn.preprocessing import label_binarize
+import numpy as np
 from pathlib import Path
-from datetime import datetime
-from src.config import BASE_DIR
-
-# Configure logging
-def setup_logging(log_dir='logs', level=logging.INFO):
-    """
-    Set up logging for the application
-    
-    Parameters:
-    -----------
-    log_dir : str, default='logs'
-        Directory to store log files
-    level : int, default=logging.INFO
-        Logging level
-        
-    Returns:
-    --------
-    logging.Logger
-        Configured logger
-    """
-    os.makedirs(log_dir, exist_ok=True)
-    
-    # Create a timestamped log filename
-    log_filename = f"log_{datetime.now().strftime('%Y%m%d-%H%M%S')}.txt"
-    log_filepath = os.path.join(log_dir, log_filename)
-    
-    # Set up logger
-    logger = logging.getLogger()
-    logger.setLevel(level)
-    
-    # Remove existing handlers to prevent duplicate logging
-    if logger.hasHandlers():
-        logger.handlers.clear()
-    
-    # Create file handler
-    file_handler = logging.FileHandler(log_filepath)
-    file_handler.setLevel(level)
-    
-    # Create console handler
-    console_handler = logging.StreamHandler()
-    console_handler.setLevel(level)
-    
-    # Create formatter
-    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    file_handler.setFormatter(formatter)
-    console_handler.setFormatter(formatter)
-    
-    # Add handlers to logger
-    logger.addHandler(file_handler)
-    logger.addHandler(console_handler)
-    
-    logger.info(f"Logging initialized. Log file: {log_filepath}")
-    return logger
+from sklearn.metrics import confusion_matrix
+from sklearn.manifold import TSNE
 
 def plot_confusion_matrix(y_true, y_pred, class_names=None, figsize=(10, 8), save_path=None):
     """
@@ -156,8 +100,6 @@ def visualize_latent_space(features, labels, figsize=(10, 8), save_path=None):
     save_path : str, optional
         Path to save the figure
     """
-    from sklearn.manifold import TSNE
-    
     # Apply t-SNE for dimensionality reduction
     tsne = TSNE(n_components=2, random_state=42)
     features_tsne = tsne.fit_transform(features)
