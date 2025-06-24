@@ -146,7 +146,7 @@ def main():
         X_power=X_power,
         y_power=y_power
     )
-    
+    breakpoint()
     # Process data with the trained encoder
     processed_data = trainer.process_data(
         encoder=encoder,

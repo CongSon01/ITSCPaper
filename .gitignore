@@ -30,5 +30,7 @@ logs/
 # Results directory
 results/
 
+NetworkTraffic/
+
 # Others
 .DS_Store

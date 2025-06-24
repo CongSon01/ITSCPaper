@@ -22,7 +22,7 @@ try:
 except:
     pass
 
-from tensorflow.keras.layers import Input, Dense, Dropout, BatchNormalization
+from tensorflow.keras import layers
 from tensorflow.keras.models import Model
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.losses import SparseCategoricalCrossentropy
@@ -42,41 +42,71 @@ class MMDGANEncoder:
     2. Adversarial Loss - to ensure the latent space is well-structured
     """
     
-    def __init__(self, input_dim, latent_dim=16, hidden_dims=[64, 32], 
-                 dropout_rate=0.2, learning_rate=0.001, triplet_margin=1.0):
+    def __init__(self, input_dim=36, latent_dim=16, encoder_layers=None, decoder_layers=None,
+                 optimizer='adam', batch_size=64, mmd_weight=1.0,
+                 triplet_weight=0.5, margin=1.0, discriminator_layers=None):
         """
-        Initialize the MMD-GAN Encoder.
+        Initialize the MMD-GAN encoder.
         
         Parameters:
         -----------
-        input_dim : int
-            Dimension of the input features
+        input_dim : int, default=36
+            Dimension of input features
         latent_dim : int, default=16
             Dimension of the latent space
-        hidden_dims : list, default=[64, 32]
-            Dimensions of hidden layers
-        dropout_rate : float, default=0.2
-            Dropout rate for regularization
-        learning_rate : float, default=0.001
-            Learning rate for optimizer
-        triplet_margin : float, default=1.0
-            Margin parameter for triplet loss
+        encoder_layers : list, optional
+            List of layer sizes for the encoder network
+        decoder_layers : list, optional
+            List of layer sizes for the decoder network
+        optimizer : str or tf.keras.optimizers.Optimizer, default='adam'
+            Optimizer for training
+        batch_size : int, default=64
+            Batch size for training
+        mmd_weight : float, default=1.0
+            Weight for the MMD loss component
+        triplet_weight : float, default=0.5
+            Weight for the triplet loss component
+        margin : float, default=1.0
+            Margin for triplet loss
+        discriminator_layers : list, optional
+            List of layer sizes for the discriminator network
         """
         self.input_dim = input_dim
+        self.actual_input_dim = None  # Will be set when actual data is provided
         self.latent_dim = latent_dim
-        self.hidden_dims = hidden_dims
-        self.dropout_rate = dropout_rate
-        self.learning_rate = learning_rate
-        self.triplet_margin = triplet_margin
+        self.encoder_layers = [128, 64] if encoder_layers is None else encoder_layers
+        self.decoder_layers = [64, 128] if decoder_layers is None else decoder_layers
+        
+        # Optimizer settings
+        if isinstance(optimizer, str):
+            self.optimizer = tf.keras.optimizers.get(optimizer)
+        else:
+            self.optimizer = optimizer
+        
+        # Training settings
+        self.batch_size = batch_size
+        self.mmd_weight = mmd_weight
+        self.triplet_weight = triplet_weight
+        self.margin = margin
+        
+        # Discriminator settings
+        self.discriminator_layers = [64, 32] if discriminator_layers is None else discriminator_layers
+        
+        # Initialize models
+        self.encoder = None
+        self.decoder = None
+        self.discriminator = None
+        self.combined = None
+        self.model_initialized = False
         
         # Build the encoder model
         self.encoder = self._build_encoder()
         
-        # Build the discriminator model
-        self.discriminator = self._build_discriminator()
-        
-        # Create the combined model for adversarial training
+        # Build combined model
         self.combined = self._build_combined_model()
+        
+        # Compile the model
+        self.compile_model()
     
     def _build_encoder(self):
         """
@@ -84,27 +114,26 @@ class MMDGANEncoder:
         
         Returns:
         --------
-        tf.keras.Model
+        keras.Model
             The encoder model
         """
-        inputs = Input(shape=(self.input_dim,))
+        # Use the actual input dimension if it has been set, otherwise use the configured input_dim
+        input_dim_to_use = self.actual_input_dim if self.actual_input_dim is not None else self.input_dim
+        logger.info(f"Building encoder with input dimension: {input_dim_to_use}")
         
-        # Initial dense layer
-        x = Dense(self.hidden_dims[0], activation='relu')(inputs)
-        x = BatchNormalization()(x)
-        x = Dropout(self.dropout_rate)(x)
+        inputs = layers.Input(shape=(input_dim_to_use,))
+        x = inputs
         
-        # Hidden layers
-        for dim in self.hidden_dims[1:]:
-            x = Dense(dim, activation='relu')(x)
-            x = BatchNormalization()(x)
-            x = Dropout(self.dropout_rate)(x)
+        # Add hidden layers
+        for dim in self.encoder_layers:
+            x = layers.Dense(dim, activation='relu')(x)
+            x = layers.BatchNormalization()(x)
         
-        # Latent space representation
-        latent = Dense(self.latent_dim, activation='linear', name='latent')(x)
+        # Add output layer (latent space)
+        latent = layers.Dense(self.latent_dim, activation='linear')(x)
         
-        # Create the encoder model
-        encoder = Model(inputs=inputs, outputs=latent, name='encoder')
+        # Create and return the model
+        encoder = Model(inputs, latent, name='encoder')
         return encoder
     
     def _build_discriminator(self):
@@ -116,27 +145,42 @@ class MMDGANEncoder:
         tf.keras.Model
             The discriminator model
         """
+        from tensorflow.keras.layers import Input, Dense, Lambda
+        
         latent_input = Input(shape=(self.latent_dim,))
         class_input = Input(shape=(1,))  # Class label as input
         
-        # Embedding for the class
-        class_embedding = Dense(8, activation='relu')(tf.cast(class_input, tf.float32))
+        # Embedding for the class - use Lambda layer to wrap tf.cast
+        class_embedding = Lambda(lambda x: tf.cast(x, tf.float32))(class_input)
+        class_embedding = Dense(8, activation='relu')(class_embedding)
         
         # Concatenate latent code and class embedding
-        x = tf.concat([latent_input, class_embedding], axis=-1)
+        x = Lambda(lambda inputs: tf.concat(inputs, axis=-1))([latent_input, class_embedding])
         
         # Discriminator layers
-        x = Dense(32, activation='relu')(x)
-        x = Dense(16, activation='relu')(x)
+        for units in self.discriminator_layers:
+            x = Dense(units, activation='relu')(x)
         
         # Output layer (binary classification)
         validity = Dense(1, activation='sigmoid', name='validity')(x)
         
         # Create the discriminator model
         discriminator = Model(inputs=[latent_input, class_input], outputs=validity, name='discriminator')
+        
+        # Use the optimizer's learning rate if available, otherwise use a default value
+        learning_rate = 0.001
+        if hasattr(self.optimizer, 'learning_rate'):
+            try:
+                # Convert TensorFlow tensor to Python float
+                lr = self.optimizer.learning_rate
+                if hasattr(lr, 'numpy'):
+                    learning_rate = float(lr.numpy())
+            except:
+                logger.warning("Could not extract learning rate from optimizer, using default value")
+        
         discriminator.compile(
             loss='binary_crossentropy',
-            optimizer=Adam(learning_rate=self.learning_rate),
+            optimizer=Adam(learning_rate=learning_rate),
             metrics=['accuracy']
         )
         return discriminator
@@ -150,11 +194,18 @@ class MMDGANEncoder:
         tf.keras.Model
             The combined model
         """
+        from tensorflow.keras.layers import Input
+        
+        # Initialize discriminator if it doesn't exist
+        if self.discriminator is None:
+            self.discriminator = self._build_discriminator()
+            
         # Freeze the discriminator for generator training
         self.discriminator.trainable = False
         
         # Generator inputs
-        gen_input = Input(shape=(self.input_dim,))
+        input_dim_to_use = self.actual_input_dim if self.actual_input_dim is not None else self.input_dim
+        gen_input = Input(shape=(input_dim_to_use,))
         class_input = Input(shape=(1,))
         
         # Generate latent code
@@ -165,9 +216,21 @@ class MMDGANEncoder:
         
         # The combined model takes the generator input and outputs validity
         combined = Model(inputs=[gen_input, class_input], outputs=validity, name='combined')
+        
+        # Use the optimizer's learning rate if available, otherwise use a default value
+        learning_rate = 0.001
+        if hasattr(self.optimizer, 'learning_rate'):
+            try:
+                # Convert TensorFlow tensor to Python float
+                lr = self.optimizer.learning_rate
+                if hasattr(lr, 'numpy'):
+                    learning_rate = float(lr.numpy())
+            except:
+                logger.warning("Could not extract learning rate from optimizer, using default value")
+            
         combined.compile(
             loss='binary_crossentropy',
-            optimizer=Adam(learning_rate=self.learning_rate)
+            optimizer=Adam(learning_rate=learning_rate)
         )
         return combined
     
@@ -212,7 +275,7 @@ class MMDGANEncoder:
         neg_dist = self.euclidean_distance(anchor, negative)
         
         # Triplet loss formula: max(0, d(a,p) - d(a,n) + margin)
-        basic_loss = pos_dist - neg_dist + self.triplet_margin
+        basic_loss = pos_dist - neg_dist + self.margin
         loss = tf.maximum(basic_loss, 0.0)
         return tf.reduce_mean(loss)
     
@@ -227,13 +290,49 @@ class MMDGANEncoder:
         positives : tf.Tensor
             Positive samples
         negatives : tf.Tensor
-            Negative samples
             
         Returns:
         --------
         float
             Triplet loss value
         """
+        # Ensure optimizer is initialized
+        if not hasattr(self, 'encoder_optimizer'):
+            self.compile_model()
+            
+        # Check if we need to rebuild the encoder with correct input dimensions
+        actual_input_dim = anchors.shape[1]
+        if self.actual_input_dim != actual_input_dim:
+            logger.info(f"Rebuilding encoder model with correct input dimension: {actual_input_dim} (was {self.input_dim})")
+            
+            # Store the actual input dimension
+            self.actual_input_dim = actual_input_dim
+            
+            # Save old weights if model was already initialized
+            old_weights = None
+            if self.model_initialized:
+                try:
+                    old_weights = self.encoder.get_weights()
+                except:
+                    logger.warning("Could not save old encoder weights")
+            
+            # Rebuild the encoder with correct input dimensions
+            self.encoder = self._build_encoder()
+            
+            # Try to restore weights if they're compatible
+            if old_weights is not None:
+                try:
+                    self.encoder.set_weights(old_weights)
+                    logger.info("Successfully restored encoder weights")
+                except:
+                    logger.warning("Could not restore encoder weights - incompatible shapes")
+            
+            # Recompile the model
+            self.compile_model()
+            
+            # Mark as initialized
+            self.model_initialized = True
+            
         with tf.GradientTape() as tape:
             # Encode samples
             anchor_encodings = self.encoder(anchors)
@@ -297,7 +396,15 @@ class MMDGANEncoder:
         """
         Compile the encoder model.
         """
-        self.encoder_optimizer = Adam(learning_rate=self.learning_rate)
+        # Get the learning rate from the optimizer if possible, otherwise use default
+        learning_rate = 0.001
+        if hasattr(self.optimizer, 'learning_rate'):
+            try:
+                learning_rate = self.optimizer.learning_rate.numpy()
+            except:
+                pass
+        
+        self.encoder_optimizer = Adam(learning_rate=learning_rate)
         self.encoder.compile(optimizer=self.encoder_optimizer)
     
     def train(self, X_hpc, y_hpc, X_power, y_power, epochs=100, batch_size=32, sample_weight=None):
@@ -326,6 +433,7 @@ class MMDGANEncoder:
         dict
             Training history
         """
+        # Make sure the model is compiled before training
         self.compile_model()
         
         # Convert y values to proper format if they're not already
